@@ -1,12 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
 import {
   Camera,
   useCameraDevice,
   useCameraPermission,
   usePhotoOutput,
 } from 'react-native-vision-camera';
-import { PoseDetectorModule, Landmark } from '../../src/native/PosePlugin';
+import { Landmark, PoseDetectorModule } from '../../src/native/PosePlugin';
 
 export default function HomeScreen() {
   const { hasPermission, requestPermission } = useCameraPermission();
@@ -61,7 +61,9 @@ export default function HomeScreen() {
 
       try {
         // Captura
-        photo = await photoOutput.capturePhoto({}, {});
+        photo = await photoOutput.capturePhoto({
+          enableShutterSound: false,
+        }, {});
 
         console.log('📷 Foto capturada com sucesso!');
 
