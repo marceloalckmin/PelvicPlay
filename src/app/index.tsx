@@ -1,98 +1,218 @@
-import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-
-import { AnimatedIcon } from '@/components/animated-icon';
-import { HintRow } from '@/components/hint-row';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
-
-function getDevMenuHint() {
-  if (Platform.OS === 'web') {
-    return <ThemedText type="small">use browser devtools</ThemedText>;
-  }
-  if (Device.isDevice) {
-    return (
-      <ThemedText type="small">
-        shake device or press <ThemedText type="code">m</ThemedText> in terminal
-      </ThemedText>
-    );
-  }
-  const shortcut = Platform.OS === 'android' ? 'cmd+m (or ctrl+m)' : 'cmd+d';
-  return (
-    <ThemedText type="small">
-      press <ThemedText type="code">{shortcut}</ThemedText>
-    </ThemedText>
-  );
-}
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, StyleSheet } from 'react-native';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraPermission,
+  usePhotoOutput,
+} from 'react-native-vision-camera';
+import { PoseDetectorModule, Landmark } from '../../src/native/PosePlugin';
 
 export default function HomeScreen() {
+  const { hasPermission, requestPermission } = useCameraPermission();
+  const device = useCameraDevice('front');
+  const emProcessamento = useRef(false);
+  const cameraReadyRef = useRef(false);
+  const [pontos, setPontos] = useState<number>(0);
+  const [detalhesArticulacoes, setDetalhesArticulacoes] = useState<string>('Aguardando detecção...');
+  const [logStatus, setLogStatus] = useState<string>('Iniciando...');
+
+  const photoOutput = usePhotoOutput({
+    qualityPrioritization: 'speed',
+    quality: 0.5,
+  });
+
+  useEffect(() => {
+    if (!hasPermission) requestPermission();
+  }, [hasPermission, requestPermission]);
+
+  useEffect(() => {
+    let ativo = true;
+
+    PoseDetectorModule.inicializar()
+      .then(() => {
+        console.log('✅ MediaPipe Inicializado com Sucesso!');
+        setLogStatus('MediaPipe Inicializado OK!');
+      })
+      .catch((e) => {
+        console.log('❌ Erro ao Inicializar MediaPipe:', e);
+        setLogStatus(`Erro Init: ${e?.message || e}`);
+      });
+
+    const timer = setInterval(async () => {
+      if (
+        !ativo ||
+        emProcessamento.current ||
+        !photoOutput ||
+        !cameraReadyRef.current
+      ) return;
+
+      emProcessamento.current = true;
+      console.log('🔄 Iniciando captura de foto...');
+
+      const safetyTimeout = setTimeout(() => {
+        if (emProcessamento.current) {
+          console.log('⚠️ Captura demorou demais. Destravando...');
+          emProcessamento.current = false;
+        }
+      }, 1500);
+
+      let photo: any = null;
+
+      try {
+        // Captura
+        photo = await photoOutput.capturePhoto({}, {});
+
+        console.log('📷 Foto capturada com sucesso!');
+
+        // Salva a Photo em um arquivo temporário
+        const path = await photo.saveToTemporaryFileAsync();
+
+        if (path) {
+          console.log('📁 Arquivo salvo:', path);
+          setLogStatus(`Foto: ${path.split('/').pop()}`);
+
+          // Envia o caminho para o MediaPipe
+          const landmarks: Landmark[] = await PoseDetectorModule.processarFrame(path);
+
+          if (ativo && landmarks) {
+            setPontos(landmarks.length);
+            console.log(`📌 Retorno do MediaPipe: ${landmarks.length} pontos`);
+
+            // Leitura e formatação dos Ombros e Joelhos
+            if (landmarks.length >= 33) {
+              const ombroEsq = landmarks[11];
+              const ombroDir = landmarks[12];
+              const joelhoEsq = landmarks[25];
+              const joelhoDir = landmarks[26];
+
+              console.log(`
+--------------------------------------------------
+🟢 POSE DETECTADA (33 PONTOS):
+- Ombro Esquerdo  (Ponto 11): x=${ombroEsq.x.toFixed(2)}, y=${ombroEsq.y.toFixed(2)}, vis=${ombroEsq.visibility.toFixed(2)}
+- Ombro Direito   (Ponto 12): x=${ombroDir.x.toFixed(2)}, y=${ombroDir.y.toFixed(2)}, vis=${ombroDir.visibility.toFixed(2)}
+- Joelho Esquerdo (Ponto 25): x=${joelhoEsq.x.toFixed(2)}, y=${joelhoEsq.y.toFixed(2)}, vis=${joelhoEsq.visibility.toFixed(2)}
+- Joelho Direito  (Ponto 26): x=${joelhoDir.x.toFixed(2)}, y=${joelhoDir.y.toFixed(2)}, vis=${joelhoDir.visibility.toFixed(2)}
+--------------------------------------------------
+              `);
+
+              setDetalhesArticulacoes(
+                `Ombros: L(${ombroEsq.x.toFixed(2)}, ${ombroEsq.y.toFixed(2)}) R(${ombroDir.x.toFixed(2)}, ${ombroDir.y.toFixed(2)})\n` +
+                `Joelhos: L(${joelhoEsq.x.toFixed(2)}, ${joelhoEsq.y.toFixed(2)}) R(${joelhoDir.x.toFixed(2)}, ${joelhoDir.y.toFixed(2)})`
+              );
+            } else {
+              setDetalhesArticulacoes('🔴 Nenhuma pose detectada');
+            }
+          }
+        } else {
+          console.log('⚠️ Não foi possível salvar a foto!');
+          setLogStatus('Erro ao salvar foto');
+        }
+
+      } catch (e: any) {
+        console.log('❌ Erro durante captura:', e?.message || e);
+        setLogStatus(`Erro Captura: ${e?.message || e}`);
+      } finally {
+        clearTimeout(safetyTimeout);
+
+        if (photo) {
+          photo.dispose();
+        }
+
+        setTimeout(() => {
+          emProcessamento.current = false;
+        }, 300);
+      }
+    }, 500);
+
+    return () => {
+      ativo = false;
+      clearInterval(timer);
+      PoseDetectorModule.finalizar().catch(() => {});
+    };
+  }, [photoOutput]);
+
   return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
-          <ThemedText type="title" style={styles.title}>
-            Welcome to&nbsp;Expo
-          </ThemedText>
-        </ThemedView>
+    <View style={styles.container}>
+      {device && (
+        <Camera
+          style={StyleSheet.absoluteFill}
+          device={device}
+          isActive={true}
 
-        <ThemedText type="code" style={styles.code}>
-          get started
-        </ThemedText>
+          // ALTERAÇÃO 1:
+          // PhotoOutput agora é conectado através de outputs
+          outputs={[photoOutput]}
 
-        <ThemedView type="backgroundElement" style={styles.stepContainer}>
-          <HintRow
-            title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
-          />
-          <HintRow title="Dev tools" hint={getDevMenuHint()} />
-          <HintRow
-            title="Fresh start"
-            hint={<ThemedText type="code">npm run reset-project</ThemedText>}
-          />
-        </ThemedView>
+          // ALTERAÇÃO 2:
+          // Espera a CameraSession estar configurada
+          onConfigured={() => {
+            console.log('🎥 CameraSession configurada!');
+            console.log('📷 PhotoOutput conectado!');
+            cameraReadyRef.current = true;
+            setLogStatus('Câmera configurada! Capturando...');
+          }}
 
-        {Platform.OS === 'web' && <WebBadge />}
-      </SafeAreaView>
-    </ThemedView>
+          onError={(error) => {
+            console.log('❌ Erro da câmera:', error);
+            cameraReadyRef.current = false;
+            setLogStatus(`Erro Camera: ${error?.message || error}`);
+          }}
+        />
+      )}
+
+      <View style={styles.overlay}>
+        <Text style={styles.texto}>
+          {pontos > 0
+            ? `🟢 Pose Detectada: ${pontos} pontos`
+            : '🔴 Aguardando corpo na câmera...'}
+        </Text>
+
+        <Text style={styles.detalhes}>{detalhesArticulacoes}</Text>
+
+        <Text style={styles.subtexto}>
+          Status: {logStatus}
+        </Text>
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
+    backgroundColor: '#000',
   },
-  safeArea: {
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
-    maxWidth: MaxContentWidth,
+
+  overlay: {
+    position: 'absolute',
+    top: 50,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    padding: 16,
+    borderRadius: 12,
+    gap: 6,
   },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
-  },
-  title: {
+
+  texto: {
+    color: '#FFF',
+    fontSize: 16,
     textAlign: 'center',
+    fontWeight: 'bold',
   },
-  code: {
-    textTransform: 'uppercase',
+
+  detalhes: {
+    color: '#34D399',
+    fontSize: 13,
+    textAlign: 'center',
+    fontFamily: 'monospace',
+    lineHeight: 18,
   },
-  stepContainer: {
-    gap: Spacing.three,
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.four,
-    borderRadius: Spacing.four,
+
+  subtexto: {
+    color: '#AAA',
+    fontSize: 12,
+    textAlign: 'center',
   },
 });
